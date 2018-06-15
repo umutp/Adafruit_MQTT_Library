@@ -171,7 +171,7 @@ int8_t Adafruit_MQTT::connect() {
     if (subscriptions[i] == 0) continue;
 
     boolean success = false;
-    for (uint8_t retry=0; (retry<3) && !success; retry++) { // retry until we get a suback    
+    for (uint8_t retry=0; (retry<3) && !success; retry++) { // retry until we get a suback
       // Construct and send subscription packet.
       uint8_t len = subscribePacket(buffer, subscriptions[i]->topic, subscriptions[i]->qos);
       if (!sendPacket(buffer, len))
@@ -212,7 +212,7 @@ uint16_t Adafruit_MQTT::processPacketsUntil(uint8_t *buffer, uint8_t waitforpack
     // TODO: add subscription reading & call back processing here
 
     if ((buffer[0] >> 4) == waitforpackettype) {
-      //DEBUG_PRINTLN(F("Found right packet")); 
+      //DEBUG_PRINTLN(F("Found right packet"));
       return len;
     } else {
       ERROR_PRINTLN(F("Dropped a packet"));
@@ -254,7 +254,7 @@ uint16_t Adafruit_MQTT::readFullPacket(uint8_t *buffer, uint16_t maxsize, uint16
   } while (encodedByte & 0x80);
 
   DEBUG_PRINT(F("Packet Length:\t")); DEBUG_PRINTLN(value);
-  
+
   if (value > (maxsize - (pbuff-buffer) - 1)) {
       DEBUG_PRINTLN(F("Packet too big for buffer"));
       rlen = readPacket(pbuff, (maxsize - (pbuff-buffer) - 1), timeout);
@@ -293,13 +293,13 @@ bool Adafruit_MQTT::disconnect() {
 }
 
 
-bool Adafruit_MQTT::publish(const char *topic, const char *data, uint8_t qos) {
-    return publish(topic, (uint8_t*)(data), strlen(data), qos);
+bool Adafruit_MQTT::publish(const char *topic, const char *data, uint8_t qos, bool retain) {
+    return publish(topic, (uint8_t*)(data), strlen(data), qos, retain);
 }
 
-bool Adafruit_MQTT::publish(const char *topic, uint8_t *data, uint16_t bLen, uint8_t qos) {
+bool Adafruit_MQTT::publish(const char *topic, uint8_t *data, uint16_t bLen, uint8_t qos, bool retain) {
   // Construct and send publish packet.
-  uint16_t len = publishPacket(buffer, topic, data, bLen, qos);
+  uint16_t len = publishPacket(buffer, topic, data, bLen, qos, retain);
   if (!sendPacket(buffer, len))
     return false;
 
@@ -413,32 +413,10 @@ void Adafruit_MQTT::processPackets(int16_t timeout) {
 
   while (elapsed < (uint32_t)timeout) {
     Adafruit_MQTT_Subscribe *sub = readSubscription(timeout - elapsed);
+
     if (sub) {
-      //Serial.println("**** sub packet received");
-      if (sub->callback_uint32t != NULL) {
-	// huh lets do the callback in integer mode
-	uint32_t data = 0;
-	data = atoi((char *)sub->lastread);
-	//Serial.print("*** calling int callback with : "); Serial.println(data);
-	sub->callback_uint32t(data);
-      } 
-      else if (sub->callback_double != NULL) {
-	// huh lets do the callback in doublefloat mode
-	double data = 0;
-	data = atof((char *)sub->lastread);
-	//Serial.print("*** calling double callback with : "); Serial.println(data);
-	sub->callback_double(data);
-      }
-      else if (sub->callback_buffer != NULL) {
-	// huh lets do the callback in buffer mode
-	//Serial.print("*** calling buffer callback with : "); Serial.println((char *)sub->lastread);
-	sub->callback_buffer((char *)sub->lastread, sub->datalen);
-      }
-      else if (sub->callback_io != NULL) {
-        // huh lets do the callback in io mode
-        //Serial.print("*** calling io instance callback with : "); Serial.println((char *)sub->lastread);
-        ((sub->io_mqtt)->*(sub->callback_io))((char *)sub->lastread, sub->datalen);
-      }
+      subscribeHandler(sub->topic, (const char *)sub->lastread, sub->datalen);
+      DEBUG_PRINTER.println(sub->topic);
     }
 
     // keep track over elapsed time
@@ -450,6 +428,11 @@ void Adafruit_MQTT::processPackets(int16_t timeout) {
   }
 }
 
+void Adafruit_MQTT::setSubscribeHandler(SubscribeHandler handler)
+{
+  subscribeHandler = handler;
+}
+
 Adafruit_MQTT_Subscribe *Adafruit_MQTT::readSubscription(int16_t timeout) {
   uint16_t i, topiclen, datalen;
 
@@ -457,7 +440,7 @@ Adafruit_MQTT_Subscribe *Adafruit_MQTT::readSubscription(int16_t timeout) {
   uint16_t len = readFullPacket(buffer, MAXBUFFERSIZE, timeout); // return one full packet
   if (!len)
     return NULL;  // No data available, just quit.
-  DEBUG_PRINT("Packet len: "); DEBUG_PRINTLN(len); 
+  DEBUG_PRINT("Packet len: "); DEBUG_PRINTLN(len);
   DEBUG_PRINTBUFFER(buffer, len);
 
   // Parse out length of packet.
@@ -506,7 +489,7 @@ Adafruit_MQTT_Subscribe *Adafruit_MQTT::readSubscription(int16_t timeout) {
 
   if ((MQTT_PROTOCOL_LEVEL > 3) &&(buffer[0] & 0x6) == 0x2) {
     uint8_t ackpacket[4];
-    
+
     // Construct and send puback packet.
     uint8_t len = pubackPacket(ackpacket, packetid);
     if (!sendPacket(ackpacket, len))
@@ -634,20 +617,20 @@ uint8_t Adafruit_MQTT::connectPacket(uint8_t *packet) {
 
 // as per http://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html#_Toc398718040
 uint16_t Adafruit_MQTT::publishPacket(uint8_t *packet, const char *topic,
-                                     uint8_t *data, uint16_t bLen, uint8_t qos) {
+                                     uint8_t *data, uint16_t bLen, uint8_t qos, bool retain) {
   uint8_t *p = packet;
   uint16_t len=0;
 
   // calc length of non-header data
   len += 2;               // two bytes to set the topic size
   len += strlen(topic); // topic length
-  if(qos > 0) { 
+  if(qos > 0) {
     len += 2; // qos packet id
   }
   len += bLen; // payload length
 
   // Now you can start generating the packet!
-  p[0] = MQTT_CTRL_PUBLISH << 4 | qos << 1;
+  p[0] = MQTT_CTRL_PUBLISH << 4 | qos << 1 | (retain ? 1 : 0);
   p++;
 
   // fill in packet[1] last
@@ -793,8 +776,8 @@ bool Adafruit_MQTT_Publish::publish(double f, uint8_t precision) {
   return mqtt->publish(topic, payload, qos);
 }
 
-bool Adafruit_MQTT_Publish::publish(const char *payload) {
-  return mqtt->publish(topic, payload, qos);
+bool Adafruit_MQTT_Publish::publish(const char *payload, bool retain) {
+  return mqtt->publish(topic, payload, qos, retain);
 }
 
 //publish buffer of arbitrary length
